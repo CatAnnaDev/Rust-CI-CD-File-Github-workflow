@@ -1,0 +1,112 @@
+name: Rust CI/CD
+
+on:
+  release:
+    types:
+      - created
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    # necessary for windows
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploying to ${{ github.ref }}"
+      - uses: actions/checkout@v3
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-cache-${{ runner.os }}-
+      - name: List files
+        run: find ./
+      - name: Run tests
+        run: cargo test --verbose
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - x86_64-pc-windows-msvc
+    needs: test
+    runs-on: ${{ matrix.target }}
+    env:
+      NAME: neko_dl
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Cache Cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-cache-${{ runner.os }}-
+      - name: List files
+        run: find ./
+      - name: Install and configure dependencies
+        run: |
+          if [[ ${{ matrix.target }} == "x86_64-unknown-linux-gnu" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y crossbuild-essential-arm64 libssl-dev openssl
+          fi
+          if [[ ${{ matrix.target }} == "x86_64-unknown-linux-gnu" ]]; then
+            cat >>~/.cargo/config <<EOF
+            [target.aarch64-unknown-linux-gnu]
+            linker = "aarch64-linux-gnu-gcc"
+            EOF
+          fi
+      - name: Install rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Run build
+        run: cargo build --release --verbose --target ${{ matrix.target }}
+      - name: List target directory
+        run: find ./target
+      - name: Compress artifact
+        run: |
+          mkdir -p ./artifacts
+          EXEC=$NAME
+          if [[ ${{ matrix.target }} == "x86_64-pc-windows-msvc" ]]; then
+              EXEC=$NAME.exe
+          fi
+          TAG=${{ github.ref_name }}
+          mv ./target/${{ matrix.target }}/release/$EXEC ./artifacts/$EXEC
+          tar -czf ./artifacts/$NAME-${{ matrix.target }}-$TAG.tar.gz -C ./artifacts $EXEC
+      - name: Upload artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: $NAME-${{ matrix.target }}-$TAG
+          path: ./artifacts/$NAME-${{ matrix.target }}-$TAG.tar.gz
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: $NAME-${{ matrix.target }}-${{ github.ref_name }}
+          path: ./artifacts
+      - name: List artifacts
+        run: find ./artifacts
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./artifacts/*.tar.gz
