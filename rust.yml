@@ -1,4 +1,4 @@
-name: Rust CI/CD
+name: Rust
 
 on:
   release:
@@ -17,19 +17,16 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Deploying to ${{ github.ref }}"
+      - run: echo "Deploying to $GITHUB_REF"
       - uses: actions/checkout@v3
-      - name: Cache Cargo
+      - name: Cargo cache
         uses: actions/cache@v3
         with:
           path: |
             ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-cache-${{ runner.os }}-
-      - name: List files
+            ./target
+          key: test-cargo-registry
+      - name: List
         run: find ./
       - name: Run tests
         run: cargo test --verbose
@@ -38,63 +35,71 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-apple-darwin
-          - x86_64-pc-windows-msvc
+        include:
+          - TARGET: x86_64-unknown-linux-gnu
+            OS: ubuntu-latest
+          - TARGET: x86_64-apple-darwin
+            OS: macos-latest
+          - TARGET: x86_64-pc-windows-msvc
+            OS: windows-latest
     needs: test
-    runs-on: ${{ matrix.target }}
+    runs-on: ${{ matrix.OS }}
     env:
-      NAME: neko_dl
-      TARGET: ${{ matrix.target }}
+      NAME: neko_dl # change with the name of your project
+      TARGET: ${{ matrix.TARGET }}
+      OS: ${{ matrix.OS }}
     steps:
       - uses: actions/checkout@v3
-      - name: Cache Cargo
+      - name: Cargo cache
         uses: actions/cache@v3
         with:
           path: |
             ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-cache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-cache-${{ runner.os }}-
-      - name: List files
+            ./target
+          key: build-cargo-registry-${{matrix.TARGET}}
+      - name: List
         run: find ./
       - name: Install and configure dependencies
         run: |
-          if [[ ${{ matrix.target }} == "x86_64-unknown-linux-gnu" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y crossbuild-essential-arm64 libssl-dev openssl
+          # dependencies are only needed on ubuntu as that's the only place where
+          # we make cross-compilation
+          if [[ $OS =~ ^ubuntu.*$ ]]; then
+            sudo apt-get install -qq crossbuild-essential-arm64 libssl-dev openssl
           fi
-          if [[ ${{ matrix.target }} == "x86_64-unknown-linux-gnu" ]]; then
-            cat >>~/.cargo/config <<EOF
-            [target.aarch64-unknown-linux-gnu]
-            linker = "aarch64-linux-gnu-gcc"
-            EOF
-          fi
+
+          # some additional configuration for cross-compilation on linux
+          cat >>~/.cargo/config <<EOF
+          EOF
       - name: Install rust target
-        run: rustup target add ${{ matrix.target }}
+        run: rustup target add $TARGET
       - name: Run build
-        run: cargo build --release --verbose --target ${{ matrix.target }}
-      - name: List target directory
+        run: cargo build --release --verbose --target $TARGET
+      - name: List target
         run: find ./target
-      - name: Compress artifact
+      - name: Compress
         run: |
           mkdir -p ./artifacts
-          EXEC=$NAME
-          if [[ ${{ matrix.target }} == "x86_64-pc-windows-msvc" ]]; then
+          # windows is the only OS using a different convention for executable file name
+          if [[ $OS =~ ^windows.*$ ]]; then
               EXEC=$NAME.exe
+          else
+              EXEC=$NAME
           fi
-          TAG=${{ github.ref_name }}
-          mv ./target/${{ matrix.target }}/release/$EXEC ./artifacts/$EXEC
-          tar -czf ./artifacts/$NAME-${{ matrix.target }}-$TAG.tar.gz -C ./artifacts $EXEC
-      - name: Upload artifact
+          if [[ $GITHUB_REF_TYPE =~ ^tag$ ]]; then
+            TAG=$GITHUB_REF_NAME
+          else
+            TAG=$GITHUB_SHA
+          fi
+          mv ./target/$TARGET/release/$EXEC ./$EXEC
+          tar -czf ./artifacts/$NAME-$TARGET-$TAG.tar.gz $EXEC
+      - name: Archive artifact
         uses: actions/upload-artifact@v2
         with:
-          name: $NAME-${{ matrix.target }}-$TAG
-          path: ./artifacts/$NAME-${{ matrix.target }}-$TAG.tar.gz
+          name: result
+          path: |
+            ./artifacts
 
+  # deploys to GitHub releases on tag
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -102,11 +107,11 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v2
         with:
-          name: $NAME-${{ matrix.target }}-${{ github.ref_name }}
+          name: result
           path: ./artifacts
-      - name: List artifacts
+      - name: List
         run: find ./artifacts
-      - name: Create Release
+      - name: Release
         uses: softprops/action-gh-release@v1
         with:
           files: ./artifacts/*.tar.gz
